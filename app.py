@@ -122,6 +122,24 @@ def main() -> None:
     st.set_page_config(page_title="ResearchR", layout="wide")
     init_state()
 
+    st.markdown(
+        """
+        <style>
+        .chat-scroll {
+            max-height: 70vh;
+            overflow-y: auto;
+            padding-right: 8px;
+        }
+        .sidebar-scroll {
+            max-height: 70vh;
+            overflow-y: auto;
+            padding-right: 8px;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
     api_key = get_api_key()
     if not api_key:
         st.error("Set OPENAI_API_KEY via environment or Streamlit secrets to run this app.")
@@ -135,9 +153,12 @@ def main() -> None:
         st.title("ResearchR")
         st.caption("Equation-level retrieval + assumption tracking (powered by OpenAI Responses API)")
 
+        chat_box = st.container()
+        chat_box.markdown('<div class="chat-scroll">', unsafe_allow_html=True)
         for msg in st.session_state.messages:
-            with st.chat_message(msg["role"]):
-                st.markdown(msg["content"])
+            with chat_box.chat_message(msg["role"]):
+                chat_box.markdown(msg["content"])
+        chat_box.markdown("</div>", unsafe_allow_html=True)
 
         user_input = st.chat_input("Paste an equation or ask a technical question...")
         if user_input:
@@ -160,35 +181,40 @@ def main() -> None:
             st.rerun()
 
     with col_side:
-        st.subheader("Equation matches")
+        side_box = st.container()
+        side_box.markdown('<div class="sidebar-scroll">', unsafe_allow_html=True)
+
+        side_box.subheader("Equation matches")
         if st.session_state.equation_hits:
             for hit in st.session_state.equation_hits:
-                st.markdown(f"**[{hit.get('title') or 'Source'}]({hit.get('url', '#')})**")
+                side_box.markdown(f"**[{hit.get('title') or 'Source'}]({hit.get('url', '#')})**")
                 meta_bits = " • ".join(filter(None, [hit.get("authors", ""), hit.get("year", "")]))
                 if meta_bits:
-                    st.caption(meta_bits)
+                    side_box.caption(meta_bits)
                 if hit.get("context_snippet"):
-                    st.write(hit["context_snippet"])
+                    side_box.write(hit["context_snippet"])
                 if hit.get("relation_to_query_equation"):
-                    st.info(hit["relation_to_query_equation"])
-                st.divider()
+                    side_box.info(hit["relation_to_query_equation"])
+                side_box.divider()
         else:
-            st.caption("No matches yet.")
+            side_box.caption("No matches yet.")
 
-        st.subheader("Current assumptions")
+        side_box.subheader("Current assumptions")
         if st.session_state.assumptions:
             for a in st.session_state.assumptions:
-                st.markdown(f"- {a['text']} *(turn {a.get('created_at_turn', '?')})*")
+                side_box.markdown(f"- {a['text']} *(turn {a.get('created_at_turn', '?')})*")
         else:
-            st.caption("None yet.")
+            side_box.caption("None yet.")
 
-        st.subheader("Consistency warnings")
+        side_box.subheader("Consistency warnings")
         latest_warnings = st.session_state.get("latest_warnings", [])
         if latest_warnings:
             for w in latest_warnings:
-                st.error(f"{w.get('problem_type', 'Issue')}: {w.get('explanation', '')}")
+                side_box.error(f"{w.get('problem_type', 'Issue')}: {w.get('explanation', '')}")
         else:
-            st.caption("None.")
+            side_box.caption("None.")
+
+        side_box.markdown("</div>", unsafe_allow_html=True)
 
 
 if __name__ == "__main__":
