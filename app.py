@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -40,20 +41,42 @@ Keep fields empty if not applicable. Do not fabricate references. If web search 
 
 
 def parse_response_text(text: str) -> Dict[str, Any]:
-    start = text.find("{")
-    end = text.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        snippet = text[start : end + 1]
+    cleaned = text.strip()
+    # Strip code fences if present.
+    cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+    cleaned = re.sub(r"\s*```$", "", cleaned)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+
+    # Fallback: find first JSON object in the text.
+    match = re.search(r"\{.*\}", cleaned, flags=re.S)
+    if match:
         try:
-            return json.loads(snippet)
+            return json.loads(match.group(0))
         except json.JSONDecodeError:
             pass
+
     return {
         "chat_answer": text,
         "equation_hits": [],
         "assumptions_delta": [],
         "consistency_warnings": [],
     }
+
+
+def extract_structured_from_response(response: Any) -> Optional[Dict[str, Any]]:
+    """Prefer structured output_json content if present."""
+    output = getattr(response, "output", None) or []
+    for item in output:
+        contents = getattr(item, "content", None) or []
+        for content in contents:
+            if getattr(content, "type", "") == "output_json":
+                parsed = getattr(content, "parsed", None)
+                if isinstance(parsed, dict):
+                    return parsed
+    return None
 
 
 def call_model(client: OpenAI, messages: List[Dict[str, Any]], assumptions: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -72,6 +95,10 @@ def call_model(client: OpenAI, messages: List[Dict[str, Any]], assumptions: List
         tools=[{"type": "web_search"}],
         max_output_tokens=8192,
     )
+
+    structured = extract_structured_from_response(response)
+    if structured:
+        return structured
 
     text: Optional[str] = getattr(response, "output_text", None)
     if not text:
