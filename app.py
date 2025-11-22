@@ -156,6 +156,8 @@ def main() -> None:
             st.session_state.equation_hits = equation_hits
             st.session_state.latest_warnings = consistency_warnings
             st.session_state.messages.append({"role": "assistant", "content": assistant_answer})
+            # Rerun so the just-appended messages render immediately.
+            st.rerun()
 
     with col_side:
         st.subheader("Equation matches")
