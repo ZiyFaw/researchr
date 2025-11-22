@@ -105,7 +105,6 @@ def call_model(client: OpenAI, messages: List[Dict[str, Any]], assumptions: List
         input=history,
         tools=[{"type": "web_search"}],
         max_output_tokens=8192,
-        response_format={"type": "json_object"},
     )
 
     structured = extract_structured_from_response(response)
