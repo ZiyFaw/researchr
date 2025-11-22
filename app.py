@@ -45,13 +45,15 @@ def parse_response_text(text: str) -> Dict[str, Any]:
     # Strip code fences if present.
     cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
     cleaned = re.sub(r"\s*```$", "", cleaned)
+    # Escape backslashes that are not valid JSON escapes (e.g., LaTeX like \frac, \alpha, \)).
+    cleaned_safe = re.sub(r"\\(?![\"\\/bfnrtu])", r"\\\\", cleaned)
     try:
-        return json.loads(cleaned)
+        return json.loads(cleaned_safe)
     except json.JSONDecodeError:
         pass
 
     # Fallback: find first JSON object in the text.
-    match = re.search(r"\{.*\}", cleaned, flags=re.S)
+    match = re.search(r"\{.*\}", cleaned_safe, flags=re.S)
     if match:
         try:
             return json.loads(match.group(0))
