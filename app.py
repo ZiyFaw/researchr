@@ -70,7 +70,7 @@ def call_model(client: OpenAI, messages: List[Dict[str, Any]], assumptions: List
         model=OPENAI_MODEL,
         input=history,
         tools=[{"type": "web_search"}],
-        max_output_tokens=700,
+        max_output_tokens=8192,
     )
 
     text: Optional[str] = getattr(response, "output_text", None)
