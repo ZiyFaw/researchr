@@ -47,18 +47,27 @@ def parse_response_text(text: str) -> Dict[str, Any]:
     cleaned = re.sub(r"\s*```$", "", cleaned)
     # Escape backslashes that are not valid JSON escapes (e.g., LaTeX like \frac, \alpha, \)).
     cleaned_safe = re.sub(r"\\(?![\"\\/bfnrtu])", r"\\\\", cleaned)
-    try:
-        return json.loads(cleaned_safe)
-    except json.JSONDecodeError:
-        pass
+    for candidate in (cleaned_safe, cleaned):
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            try:
+                return json.loads(candidate, strict=False)
+            except Exception:
+                continue
 
     # Fallback: find first JSON object in the text.
-    match = re.search(r"\{.*\}", cleaned_safe, flags=re.S)
-    if match:
-        try:
-            return json.loads(match.group(0))
-        except json.JSONDecodeError:
-            pass
+    for blob in (cleaned_safe, cleaned):
+        match = re.search(r"\{.*\}", blob, flags=re.S)
+        if match:
+            for candidate in (match.group(0),):
+                try:
+                    return json.loads(candidate)
+                except json.JSONDecodeError:
+                    try:
+                        return json.loads(candidate, strict=False)
+                    except Exception:
+                        continue
 
     return {
         "chat_answer": text,
@@ -96,6 +105,7 @@ def call_model(client: OpenAI, messages: List[Dict[str, Any]], assumptions: List
         input=history,
         tools=[{"type": "web_search"}],
         max_output_tokens=8192,
+        response_format={"type": "json_object"},
     )
 
     structured = extract_structured_from_response(response)
