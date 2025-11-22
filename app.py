@@ -139,12 +139,42 @@ def merge_assumptions(assumptions: List[Dict[str, Any]], deltas: List[Dict[str, 
     return updated
 
 
+def merge_hits(existing: List[Dict[str, Any]], new_hits: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    merged: List[Dict[str, Any]] = []
+    seen = set()
+    for hit in (existing or []) + (new_hits or []):
+        key = ((hit.get("url") or "").strip().lower(), (hit.get("title") or "").strip().lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(hit)
+    return merged
+
+
+def merge_warnings(existing: List[Dict[str, Any]], new_warnings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    merged: List[Dict[str, Any]] = []
+    seen = set()
+    for warn in (existing or []) + (new_warnings or []):
+        key = (
+            (warn.get("problem_type") or "").strip().lower(),
+            (warn.get("assumption_text") or "").strip().lower(),
+            (warn.get("explanation") or "").strip().lower(),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(warn)
+    return merged
+
+
 def init_state() -> None:
     st.session_state.setdefault("messages", [])
     st.session_state.setdefault("assumptions", [])
     st.session_state.setdefault("equation_hits", [])
+    st.session_state.setdefault("equation_hits_history", [])
     st.session_state.setdefault("turn_index", 0)
     st.session_state.setdefault("latest_warnings", [])
+    st.session_state.setdefault("warnings_history", [])
 
 
 def main() -> None:
@@ -204,7 +234,13 @@ def main() -> None:
                 st.session_state.assumptions, assumptions_delta, st.session_state.turn_index
             )
             st.session_state.equation_hits = equation_hits
+            st.session_state.equation_hits_history = merge_hits(
+                st.session_state.equation_hits_history, equation_hits
+            )
             st.session_state.latest_warnings = consistency_warnings
+            st.session_state.warnings_history = merge_warnings(
+                st.session_state.warnings_history, consistency_warnings
+            )
             st.session_state.messages.append({"role": "assistant", "content": assistant_answer})
             # Rerun so the just-appended messages render immediately.
             st.rerun()
@@ -214,9 +250,14 @@ def main() -> None:
         side_box.markdown('<div class="sidebar-scroll">', unsafe_allow_html=True)
 
         side_box.subheader("Equation matches")
-        if st.session_state.equation_hits:
-            for hit in st.session_state.equation_hits:
-                side_box.markdown(f"**[{hit.get('title') or 'Source'}]({hit.get('url', '#')})**")
+        hits_to_show = st.session_state.equation_hits_history or st.session_state.equation_hits
+        if hits_to_show:
+            for hit in hits_to_show:
+                url = hit.get("url") or "#"
+                label = hit.get("title") or url or "Source"
+                side_box.markdown(f"**[{label}]({url})**")
+                if hit.get("url"):
+                    side_box.caption(hit["url"])
                 meta_bits = " • ".join(filter(None, [hit.get("authors", ""), hit.get("year", "")]))
                 if meta_bits:
                     side_box.caption(meta_bits)
@@ -236,9 +277,9 @@ def main() -> None:
             side_box.caption("None yet.")
 
         side_box.subheader("Consistency warnings")
-        latest_warnings = st.session_state.get("latest_warnings", [])
-        if latest_warnings:
-            for w in latest_warnings:
+        all_warnings = st.session_state.get("warnings_history", []) or st.session_state.get("latest_warnings", [])
+        if all_warnings:
+            for w in all_warnings:
                 side_box.error(f"{w.get('problem_type', 'Issue')}: {w.get('explanation', '')}")
         else:
             side_box.caption("None.")
