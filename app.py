@@ -2,10 +2,11 @@ import json
 import os
 import re
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import streamlit as st
 from openai import OpenAI
+from PyPDF2 import PdfReader
 
 
 def get_api_key() -> Optional[str]:
@@ -20,6 +21,7 @@ You are ResearchR, a scientific assistant. Goals:
 - Answer user technical questions clearly.
 - Detect equations (LaTeX or plain text). When equations appear, use the `web_search` tool to find papers or technical sources that contain the same or equivalent equations. Do not invent links; only use results from `web_search`.
 - Extract new assumptions and check consistency with prior assumptions.
+- When using `web_search`, only return peer-reviewed academic articles (journals/conference papers). Do NOT cite blogs, encyclopedias, news sites, forums, or non–peer-reviewed sources. If no peer-reviewed sources are found, say so.
 
 When you need literature or examples for an equation, invoke the `web_search` tool with both the literal equation text and a short semantic description. Only surface URLs returned by `web_search`.
 
@@ -90,20 +92,58 @@ def extract_structured_from_response(response: Any) -> Optional[Dict[str, Any]]:
     return None
 
 
-def call_model(client: OpenAI, messages: List[Dict[str, Any]], assumptions: List[Dict[str, Any]]) -> Dict[str, Any]:
+def call_model(
+    client: OpenAI,
+    messages: List[Dict[str, Any]],
+    assumptions: List[Dict[str, Any]],
+    retrieved_chunks: Optional[List[Dict[str, Any]]] = None,
+    attached_doc: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
     history: List[Dict[str, Any]] = [
         {"role": "system", "content": SYSTEM_PROMPT},
+        {
+            "role": "system",
+            "content": "Always cite user-provided sources as [source:<name>] when using them.",
+        },
         {
             "role": "system",
             "content": f"Current assumptions (for consistency checking): {json.dumps(assumptions)}",
         },
     ]
+
+    if retrieved_chunks:
+        formatted = []
+        for ch in retrieved_chunks:
+            formatted.append(
+                f"[source:{ch.get('source')}] chunk {ch.get('chunk_id')}: {ch.get('text')[:800]}"
+            )
+        history.append(
+            {
+                "role": "system",
+                "content": "User-provided reference excerpts (for grounding and citation):\n"
+                + "\n\n".join(formatted),
+            }
+        )
+
+    if attached_doc:
+        history.append(
+            {
+                "role": "system",
+                "content": f"Document attached for this query (do NOT add to RAG): [attached:{attached_doc.get('name')}] {attached_doc.get('text')[:2000]}",
+            }
+        )
+
     history.extend(messages)
 
     response = client.responses.create(
         model=OPENAI_MODEL,
         input=history,
-        tools=[{"type": "web_search"}],
+        tools=[
+            {
+                "type": "web_search",
+                "instructions": "Return only peer-reviewed academic articles (journals or conference papers). Exclude blogs, news, encyclopedias, forums, and non-reviewed sources."
+            }
+        ],
         max_output_tokens=8192,
     )
 
@@ -176,6 +216,43 @@ def merge_warnings(existing: List[Dict[str, Any]], new_warnings: List[Dict[str, 
     return merged
 
 
+def extract_text_from_pdf(file) -> str:
+    reader = PdfReader(file)
+    texts = []
+    for page in reader.pages:
+        try:
+            texts.append(page.extract_text() or "")
+        except Exception:
+            continue
+    return "\n".join(texts)
+
+
+def chunk_text(text: str, chunk_size: int = 1200, overlap: int = 200) -> List[str]:
+    words = text.split()
+    chunks = []
+    start = 0
+    while start < len(words):
+        end = min(len(words), start + chunk_size)
+        chunks.append(" ".join(words[start:end]))
+        start = end - overlap
+        if start < 0:
+            start = 0
+        if end == len(words):
+            break
+    return chunks
+
+
+def simple_retrieve(chunks: List[Dict[str, Any]], query: str, k: int = 3) -> List[Dict[str, Any]]:
+    query_terms = set(re.findall(r"\w+", query.lower()))
+    scored: List[Tuple[int, Dict[str, Any]]] = []
+    for ch in chunks:
+        text = ch.get("text", "").lower()
+        score = sum(1 for t in query_terms if t in text)
+        scored.append((score, ch))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [c for s, c in scored if s > 0][:k] or [c for s, c in scored][:k]
+
+
 def init_state() -> None:
     st.session_state.setdefault("messages", [])
     st.session_state.setdefault("assumptions", [])
@@ -184,6 +261,8 @@ def init_state() -> None:
     st.session_state.setdefault("turn_index", 0)
     st.session_state.setdefault("latest_warnings", [])
     st.session_state.setdefault("warnings_history", [])
+    st.session_state.setdefault("corpus_chunks", [])
+    st.session_state.setdefault("uploaded_sources", [])
 
 
 def main() -> None:
@@ -221,6 +300,33 @@ def main() -> None:
         st.title("ResearchR")
         st.caption("Equation-level retrieval + assumption tracking (powered by OpenAI Responses API)")
 
+        st.markdown("**Upload persistent sources (added to RAG):**")
+        source_files = st.file_uploader(
+            "Add PDFs to cite in answers", type=["pdf"], accept_multiple_files=True, key="source_uploader"
+        )
+        if source_files:
+            for f in source_files:
+                if f.name in st.session_state.uploaded_sources:
+                    continue
+                text = extract_text_from_pdf(f)
+                chunks = chunk_text(text)
+                chunk_records = [
+                    {"source": f.name, "text": chunk, "chunk_id": f"{f.name}-{idx}"} for idx, chunk in enumerate(chunks)
+                ]
+                st.session_state.corpus_chunks.extend(chunk_records)
+                st.session_state.uploaded_sources.append(f.name)
+                st.success(f"Added {f.name} with {len(chunk_records)} chunks.")
+
+        st.markdown("**Attach a document for this message (not stored):**")
+        attach_file = st.file_uploader(
+            "Attach PDF for this message only", type=["pdf"], accept_multiple_files=False, key="attach_uploader"
+        )
+        attached_doc = None
+        attached_doc_text = ""
+        if attach_file:
+            attached_doc_text = extract_text_from_pdf(attach_file)
+            attached_doc = {"name": attach_file.name, "text": attached_doc_text}
+
         chat_box = st.container()
         chat_box.markdown('<div class="chat-scroll">', unsafe_allow_html=True)
         for msg in st.session_state.messages:
@@ -228,12 +334,37 @@ def main() -> None:
                 chat_box.markdown(msg["content"])
         chat_box.markdown("</div>", unsafe_allow_html=True)
 
-        user_input = st.chat_input("Paste an equation or ask a technical question...")
+        user_prompt = st.text_area("Paste an equation or ask a technical question...", key="user_prompt", height=120)
+        action_col1, action_col2 = st.columns(2)
+        send_clicked = action_col1.button("Send")
+        analyze_clicked = action_col2.button(
+            "Analyze attached doc", disabled=attached_doc is None, help="Requires an attached document"
+        )
+
+        user_input = None
+        if analyze_clicked and attached_doc:
+            user_input = (
+                "Analyze the attached document thoroughly: summarize sections, extract equations, list assumptions, "
+                "check for internal consistency, and relate to prior chat context. Include citations as [attached:<name>]."
+            )
+        elif send_clicked and user_prompt.strip():
+            user_input = user_prompt.strip()
+
         if user_input:
             st.session_state.messages.append({"role": "user", "content": user_input})
             st.session_state.turn_index += 1
+            st.session_state.user_prompt = ""
 
-            model_payload = call_model(client, st.session_state.messages, st.session_state.assumptions)
+            # Retrieve chunks from user-provided corpus for grounding.
+            retrieved_chunks = simple_retrieve(st.session_state.corpus_chunks, user_input, k=3)
+
+            model_payload = call_model(
+                client,
+                st.session_state.messages,
+                st.session_state.assumptions,
+                retrieved_chunks=retrieved_chunks,
+                attached_doc=attached_doc,
+            )
             assistant_answer = model_payload.get("chat_answer", "")
             equation_hits = model_payload.get("equation_hits") or []
             assumptions_delta = model_payload.get("assumptions_delta") or []
@@ -290,6 +421,13 @@ def main() -> None:
         if all_warnings:
             for w in all_warnings:
                 side_box.error(f"{w.get('problem_type', 'Issue')}: {w.get('explanation', '')}")
+        else:
+            side_box.caption("None.")
+
+        side_box.subheader("Uploaded sources (RAG)")
+        if st.session_state.uploaded_sources:
+            for name in st.session_state.uploaded_sources:
+                side_box.caption(f"• {name}")
         else:
             side_box.caption("None.")
 
