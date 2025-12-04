@@ -353,7 +353,6 @@ def main() -> None:
         if user_input:
             st.session_state.messages.append({"role": "user", "content": user_input})
             st.session_state.turn_index += 1
-            st.session_state.user_prompt = ""
 
             # Retrieve chunks from user-provided corpus for grounding.
             retrieved_chunks = simple_retrieve(st.session_state.corpus_chunks, user_input, k=3)
