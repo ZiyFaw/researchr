@@ -47,29 +47,24 @@ def parse_response_text(text: str) -> Dict[str, Any]:
     # Strip code fences if present.
     cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
     cleaned = re.sub(r"\s*```$", "", cleaned)
+    # Remove control characters that can break JSON (keep tabs/newlines).
+    cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", " ", cleaned)
     # Escape backslashes that are not valid JSON escapes (e.g., LaTeX like \frac, \alpha, \)).
     cleaned_safe = re.sub(r"\\(?![\"\\/bfnrtu])", r"\\\\", cleaned)
-    for candidate in (cleaned_safe, cleaned):
-        try:
-            return json.loads(candidate)
-        except json.JSONDecodeError:
-            try:
-                return json.loads(candidate, strict=False)
-            except Exception:
-                continue
 
-    # Fallback: find first JSON object in the text.
-    for blob in (cleaned_safe, cleaned):
+    candidates = [cleaned_safe, cleaned]
+
+    # Fallback: extract the first JSON object span.
+    for blob in [cleaned_safe, cleaned]:
         match = re.search(r"\{.*\}", blob, flags=re.S)
         if match:
-            for candidate in (match.group(0),):
-                try:
-                    return json.loads(candidate)
-                except json.JSONDecodeError:
-                    try:
-                        return json.loads(candidate, strict=False)
-                    except Exception:
-                        continue
+            candidates.append(match.group(0))
+
+    for candidate in candidates:
+        try:
+            return json.loads(candidate)
+        except Exception:
+            continue
 
     return {
         "chat_answer": text,
@@ -98,6 +93,7 @@ def call_model(
     assumptions: List[Dict[str, Any]],
     retrieved_chunks: Optional[List[Dict[str, Any]]] = None,
     attached_doc: Optional[Dict[str, str]] = None,
+    analyze_mode: bool = False,
 ) -> Dict[str, Any]:
     history: List[Dict[str, Any]] = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -108,6 +104,10 @@ def call_model(
         {
             "role": "system",
             "content": f"Current assumptions (for consistency checking): {json.dumps(assumptions)}",
+        },
+        {
+            "role": "system",
+            "content": "Prefer peer-reviewed sources (RAG or web) over user-attached document; use the attached doc mainly as content to be verified/checked against trusted sources.",
         },
     ]
 
@@ -120,7 +120,7 @@ def call_model(
         history.append(
             {
                 "role": "system",
-                "content": "User-provided reference excerpts (for grounding and citation):\n"
+                "content": "User-provided reference excerpts (peer-reviewed or user-uploaded RAG) for grounding and citation:\n"
                 + "\n\n".join(formatted),
             }
         )
@@ -129,7 +129,11 @@ def call_model(
         history.append(
             {
                 "role": "system",
-                "content": f"Document attached for this query (do NOT add to RAG): [attached:{attached_doc.get('name')}] {attached_doc.get('text')[:2000]}",
+                "content": (
+                    f"Document attached for this query (do NOT add to RAG): [attached:{attached_doc.get('name')}] "
+                    f"{attached_doc.get('text')[:2000]}\n"
+                    "Treat this as claims to verify against peer-reviewed sources and uploaded RAG; do not over-cite the attached document."
+                ),
             }
         )
 
@@ -139,7 +143,7 @@ def call_model(
         model=OPENAI_MODEL,
         input=history,
         tools=[{"type": "web_search"}],
-        max_output_tokens=8192,
+        max_output_tokens=28192,
     )
 
     structured = extract_structured_from_response(response)
@@ -350,7 +354,8 @@ def main() -> None:
             st.session_state.turn_index += 1
 
             # Retrieve chunks from user-provided corpus for grounding.
-            retrieved_chunks = simple_retrieve(st.session_state.corpus_chunks, user_input, k=3)
+            retrieve_query = attached_doc_text if analyze_clicked and attached_doc_text else user_input
+            retrieved_chunks = simple_retrieve(st.session_state.corpus_chunks, retrieve_query, k=3)
 
             model_payload = call_model(
                 client,
@@ -358,6 +363,7 @@ def main() -> None:
                 st.session_state.assumptions,
                 retrieved_chunks=retrieved_chunks,
                 attached_doc=attached_doc,
+                analyze_mode=analyze_clicked,
             )
             assistant_answer = model_payload.get("chat_answer", "")
             equation_hits = model_payload.get("equation_hits") or []
