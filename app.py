@@ -138,12 +138,7 @@ def call_model(
     response = client.responses.create(
         model=OPENAI_MODEL,
         input=history,
-        tools=[
-            {
-                "type": "web_search",
-                "instructions": "Return only peer-reviewed academic articles (journals or conference papers). Exclude blogs, news, encyclopedias, forums, and non-reviewed sources."
-            }
-        ],
+        tools=[{"type": "web_search"}],
         max_output_tokens=8192,
     )
 
