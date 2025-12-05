@@ -99,7 +99,7 @@ def call_model(
         {"role": "system", "content": SYSTEM_PROMPT},
         {
             "role": "system",
-            "content": "Always cite user-provided sources as [source:<name>] when using them.",
+            "content": "Always cite user-provided sources as [source:<name> p.<page>] using the page metadata provided.",
         },
         {
             "role": "system",
@@ -107,7 +107,7 @@ def call_model(
         },
         {
             "role": "system",
-            "content": "Prefer peer-reviewed sources (RAG or web) over user-attached document; use the attached doc mainly as content to be verified/checked against trusted sources.",
+            "content": "Prefer peer-reviewed sources (RAG or web) over user-attached document; use the attached doc mainly as content to be verified/checked against trusted sources. When citing, include page numbers if available.",
         },
     ]
 
@@ -115,12 +115,12 @@ def call_model(
         formatted = []
         for ch in retrieved_chunks:
             formatted.append(
-                f"[source:{ch.get('source')}] chunk {ch.get('chunk_id')}: {ch.get('text')[:800]}"
+                f"[source:{ch.get('source')} p.{ch.get('page')}] chunk {ch.get('chunk_id')}: {ch.get('text')[:800]}"
             )
         history.append(
             {
                 "role": "system",
-                "content": "User-provided reference excerpts (peer-reviewed or user-uploaded RAG) for grounding and citation:\n"
+                "content": "User-provided reference excerpts (peer-reviewed or user-uploaded RAG) for grounding and citation. Cite as [source:<name> p.<page>].\n"
                 + "\n\n".join(formatted),
             }
         )
@@ -215,29 +215,30 @@ def merge_warnings(existing: List[Dict[str, Any]], new_warnings: List[Dict[str, 
     return merged
 
 
-def extract_text_from_pdf(file) -> str:
+def pdf_to_chunks_with_pages(file, chunk_size: int = 400, overlap: int = 80) -> List[Dict[str, Any]]:
     reader = PdfReader(file)
-    texts = []
-    for page in reader.pages:
+    chunks: List[Dict[str, Any]] = []
+    for page_num, page in enumerate(reader.pages, start=1):
         try:
-            texts.append(page.extract_text() or "")
+            text = page.extract_text() or ""
         except Exception:
-            continue
-    return "\n".join(texts)
-
-
-def chunk_text(text: str, chunk_size: int = 1200, overlap: int = 200) -> List[str]:
-    words = text.split()
-    chunks = []
-    start = 0
-    while start < len(words):
-        end = min(len(words), start + chunk_size)
-        chunks.append(" ".join(words[start:end]))
-        start = end - overlap
-        if start < 0:
-            start = 0
-        if end == len(words):
-            break
+            text = ""
+        words = text.split()
+        start = 0
+        while start < len(words):
+            end = min(len(words), start + chunk_size)
+            chunk_text = " ".join(words[start:end])
+            chunks.append(
+                {
+                    "page": page_num,
+                    "text": chunk_text,
+                }
+            )
+            start = end - overlap
+            if start < 0:
+                start = 0
+            if end == len(words):
+                break
     return chunks
 
 
@@ -307,14 +308,19 @@ def main() -> None:
             for f in source_files:
                 if f.name in st.session_state.uploaded_sources:
                     continue
-                text = extract_text_from_pdf(f)
-                chunks = chunk_text(text)
+                page_chunks = pdf_to_chunks_with_pages(f)
                 chunk_records = [
-                    {"source": f.name, "text": chunk, "chunk_id": f"{f.name}-{idx}"} for idx, chunk in enumerate(chunks)
+                    {
+                        "source": f.name,
+                        "text": ch["text"],
+                        "page": ch["page"],
+                        "chunk_id": f"{f.name}-p{ch['page']}-{idx}",
+                    }
+                    for idx, ch in enumerate(page_chunks)
                 ]
                 st.session_state.corpus_chunks.extend(chunk_records)
                 st.session_state.uploaded_sources.append(f.name)
-                st.success(f"Added {f.name} with {len(chunk_records)} chunks.")
+                st.success(f"Added {f.name} with {len(chunk_records)} chunks (page-aware).")
 
         st.markdown("**Attach a document for this message (not stored):**")
         attach_file = st.file_uploader(
@@ -323,7 +329,9 @@ def main() -> None:
         attached_doc = None
         attached_doc_text = ""
         if attach_file:
-            attached_doc_text = extract_text_from_pdf(attach_file)
+            # Keep per-page chunks for retrieval against RAG; but attached doc is not stored.
+            attached_chunks = pdf_to_chunks_with_pages(attach_file)
+            attached_doc_text = "\n".join(ch["text"] for ch in attached_chunks)
             attached_doc = {"name": attach_file.name, "text": attached_doc_text}
 
         chat_box = st.container()
